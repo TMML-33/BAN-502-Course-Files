@@ -1,0 +1,308 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+Trey Lewis
+Project pt.  2
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(caret)
+library(ranger)
+library(randomForest)
+library(vip)
+```
+```{r}
+ames <- read.csv("ames_student.csv")
+```
+```{r}
+ames1 <- select(ames, c(17,19,20,29,30,57,58,61,81))
+```
+Selecting the variables that I found important in phase 1.
+
+```{r}
+ames1 <-  ames1 %>% 
+  mutate(Foundation = as_factor(Foundation)) %>%
+  mutate(Bsmt_Qual = as_factor(Bsmt_Qual)) %>%
+  mutate(Fireplace_Qu = as_factor(Fireplace_Qu)) %>%
+  mutate(Garage_Type = as_factor(Garage_Type)) %>%
+  mutate(Above_Median = as_factor(Above_Median))
+```
+Mutating the necessary variables to factors
+```{r}
+ames1 <- ames1 %>% mutate(Overall_Qual = as_factor(Overall_Qual))
+```
+
+```{r}
+levels(ames1$Overall_Qual) = c("Above_Average", "Average", "Good", "Very_Good", "Excellent", "Below_Average", "Average", "Below_Average", "Excellent", "Below_Average") 
+```
+```{r}
+ggplot(ames1, aes(x=Above_Median, fill=Overall_Qual)) + geom_bar()
+```
+Turning the Overall_Qual variable into a factor and lessening the amount of possible values, then ensuring it worked with a graph.
+
+```{r}
+set.seed(123)
+ames_split = initial_split(ames1, prop = 0.7, strata = Above_Median)
+train = training(ames_split)
+test = testing(ames_split)
+```
+Splitting into training and testing sets
+```{r}
+tree_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+tree_model = decision_tree() %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_wflow = 
+  workflow() %>%
+  add_model(tree_model) %>%
+  add_recipe(tree_recipe)
+
+tree_fit = fit(tree_wflow, train)
+```
+Code for the tree
+
+```{r}
+tree = tree_fit%>%
+  pull_workflow_fit() %>%
+  pluck("fit")
+
+fancyRpartPlot(tree)
+```
+Plotting the tree
+```{r}
+treepred = predict(tree_fit, train, type = "class")
+head(treepred)
+```
+
+```{r}
+confusionMatrix(treepred$.pred_class, train$Above_Median, positive = "Yes")
+```
+```{r}
+treepred_test = predict(tree_fit, test, type = "class")
+```
+```{r}
+confusionMatrix(treepred_test$.pred_class, test$Above_Median, positive = "Yes")
+```
+Confusion matrices for the trees performance on training and testing set. An accuracy of 86% on the training set and 85% on the testing set is a solid performance with little sign of overfitting. Fairly accurate decision tree.
+Now to implement k-folds and complexity tuning.
+
+```{r}
+set.seed(321)
+folds = vfold_cv(train, v = 5)
+```
+
+```{r}
+tree_recipe2 = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+tree_model2 = decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart", model = TRUE) %>%
+  set_mode("classification")
+
+tree_grid = grid_regular(cost_complexity(),
+                         levels = 25)
+
+tree_wflow2 = 
+  workflow() %>%
+  add_model(tree_model2) %>%
+  add_recipe(tree_recipe2)
+
+tree_res =
+  tree_wflow2 %>%
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+  )
+```
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+Picking a tree while including k-fold cross validation
+```{r}
+final_wf = 
+  tree_wflow2 %>%
+  finalize_workflow(best_tree)
+```
+```{r}
+final_fit = fit(final_wf, train)
+
+tree2 = final_fit %>%
+  pull_workflow_fit() %>%
+  pluck("fit")
+
+fancyRpartPlot(tree2, tweak = 1)
+```
+```{r}
+treepred2 = predict(final_fit, train, type = "class")
+```
+```{r}
+confusionMatrix(treepred2$.pred_class, train$Above_Median, positive = "Yes")
+```
+```{r}
+treepred2_test = predict(final_fit, test, type = "class")
+```
+```{r}
+confusionMatrix(treepred2_test$.pred_class, test$Above_Median, positive = "Yes")
+```
+Slightly better performance with this model, and even less sign of overfitting with both models essentially having an 87% accuracy.
+
+Now to build a random forest.
+
+```{r}
+forest_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+forest_model = rand_forest() %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+
+forest_wflow = 
+  workflow() %>%
+  add_model(forest_model) %>%
+  add_recipe(forest_recipe)
+
+set.seed(456)
+forest_fit = fit(forest_wflow, train)
+```
+
+```{r}
+train_forestpred = predict(forest_fit, train)
+```
+```{r}
+confusionMatrix(train_forestpred$.pred_class, train$Above_Median, positive = "Yes")
+```
+Confusion matrix results for the forest on training set
+```{r}
+test_forestpred = predict(forest_fit, test)
+```
+```{r}
+confusionMatrix(test_forestpred$.pred_class, test$Above_Median, positive = "Yes")
+```
+And the confusionmatrix results for the forest on testing set. We see a slight degradation from 94% accuracy to 89% accuracy from the training to the testing set respectively. This may be signs of slight overfitting, but nothing too offensive.
+```{r}
+tab <- matrix(c("94%", "89%"), ncol=2, byrow=TRUE)
+colnames(tab) <- c('Train', 'Test')
+rownames(tab) <- c('Accuracy')
+tab <- as.table(tab)
+tab
+```
+```{r}
+forest_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+Checking out variable importance. May be included in the presentation.
+
+Now to create a forest with tuning.
+
+```{r}
+rf_recipe2 = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model2 = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+
+rf_wflow2 = workflow() %>%
+  add_model(rf_model2) %>%
+  add_recipe(rf_recipe2)
+
+set.seed(456)
+rf_res = tune_grid(
+  rf_wflow2,
+  resamples = folds,
+  grid = 20
+)
+```
+Now to see what parameters are best
+```{r}
+rf_res %>%
+  collect_metrics %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+               values_to = "Value",
+               names_to = "Parameter"
+  ) %>%
+  ggplot(aes(Value, mean, color = Parameter)) + geom_point(show.legend = FALSE) + facet_wrap(~Parameter, scales = "free_x") + labs(x=NULL,y="Accuracy")
+
+```
+```{r}
+rf_recipe3 = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model3 = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+
+rf_wflow3 = workflow() %>%
+  add_model(rf_model3) %>%
+  add_recipe(rf_recipe3)
+
+rf_grid = grid_regular(
+  mtry(range = c(5,16)),
+  min_n(range = c(2,11)),
+  levels = 5
+)
+
+set.seed(456)
+rf_res_tuned = tune_grid(
+  rf_wflow3,
+  resamples = folds,
+  grid = 20
+)
+```
+Trying refined mtry and min_n values.
+```{r}
+best_rf3 = select_best(rf_res_tuned, "accuracy")
+
+final_rf3 = finalize_workflow(
+  rf_wflow3,
+  best_rf3
+)
+
+final_rf3
+```
+```{r}
+final_rf_fit = fit(final_rf3, train)
+```
+```{r}
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+```{r}
+train_finalrfpred = predict(final_rf_fit, train)
+```
+
+```{r}
+confusionMatrix(train_finalrfpred$.pred_class, train$Above_Median, positive = "Yes")
+```
+```{r}
+test_finalrfpred = predict(final_rf_fit, test)
+```
+
+```{r}
+confusionMatrix(test_finalrfpred$.pred_class, test$Above_Median, positive = "Yes")
+```
+Our training results are excellent with an accuracy of almost 97%, but we see some degradation on the testing set, with an accuracy of only 89%. Still a good tree, but may be subject to overfitting.
+```{r}
+tab <- matrix(c("97%", "89%"), ncol=2, byrow=TRUE)
+colnames(tab) <- c('Train', 'Test')
+rownames(tab) <- c('Accuracy')
+tab <- as.table(tab)
+tab
+```
+
+
+
+
+
